@@ -9,6 +9,9 @@ import {
   documentSchema,
   handleTransaction,
   headingRule,
+  bulletListRule,
+  orderedListRule,
+  buildListKeymap,
   buildContentFromDocument,
   buildDocumentFromContent,
 } from '@/lib/editor/config';
@@ -42,8 +45,11 @@ export function TextEditor({
               headingRule(4),
               headingRule(5),
               headingRule(6),
+              bulletListRule(),
+              orderedListRule(),
             ],
           }),
+          buildListKeymap(),
         ],
       });
 

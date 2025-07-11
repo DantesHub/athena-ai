@@ -1,7 +1,13 @@
 import { Schema, Node as ProseMirrorNode } from 'prosemirror-model';
 import { InputRule } from 'prosemirror-inputrules';
 import { EditorView } from 'prosemirror-view';
-import { Transaction } from 'prosemirror-state';
+import { Transaction, Plugin } from 'prosemirror-state';
+import { keymap } from 'prosemirror-keymap';
+import { 
+  splitListItem, 
+  liftListItem, 
+  sinkListItem 
+} from 'prosemirror-schema-list';
 
 export const documentSchema = new Schema({
   nodes: {
@@ -28,6 +34,32 @@ export const documentSchema = new Schema({
         { tag: 'h6', attrs: { level: 6 } }
       ],
       toDOM(node) { return [`h${node.attrs.level}`, 0]; }
+    },
+    bullet_list: {
+      content: 'list_item+',
+      group: 'block',
+      parseDOM: [{ tag: 'ul' }],
+      toDOM() { return ['ul', 0]; }
+    },
+    ordered_list: {
+      attrs: { order: { default: 1 } },
+      content: 'list_item+',
+      group: 'block',
+      parseDOM: [{
+        tag: 'ol',
+        getAttrs(dom: HTMLElement) {
+          return { order: dom.hasAttribute('start') ? +dom.getAttribute('start')! : 1 };
+        }
+      }],
+      toDOM(node) {
+        return node.attrs.order === 1 ? ['ol', 0] : ['ol', { start: node.attrs.order }, 0];
+      }
+    },
+    list_item: {
+      content: 'paragraph block*',
+      parseDOM: [{ tag: 'li' }],
+      toDOM() { return ['li', 0]; },
+      defining: true
     },
     blockquote: {
       content: 'block+',
@@ -91,6 +123,74 @@ export function headingRule(level: number): InputRule {
   );
 }
 
+export function bulletListRule(): InputRule {
+  return new InputRule(
+    /^(\s*)([-*])\s$/,
+    (state, match, start, end) => {
+      const { tr } = state;
+      const indent = match[1].length;
+      
+      // Create a list item with a paragraph inside
+      const listItem = documentSchema.nodes.list_item.create(
+        null,
+        documentSchema.nodes.paragraph.create()
+      );
+      
+      // Create a bullet list containing the list item
+      const bulletList = documentSchema.nodes.bullet_list.create(null, listItem);
+      
+      // Replace the current block with the bullet list
+      const $start = tr.doc.resolve(start);
+      const blockStart = $start.before($start.depth);
+      tr.replaceWith(blockStart, end, bulletList);
+      
+      // Set cursor position inside the list item
+      const pos = blockStart + 3; // +1 for bullet_list, +1 for list_item, +1 for paragraph
+      tr.setSelection(state.selection.constructor.near(tr.doc.resolve(pos)));
+      
+      return tr;
+    }
+  );
+}
+
+export function orderedListRule(): InputRule {
+  return new InputRule(
+    /^(\s*)(\d+)\.\s$/,
+    (state, match, start, end) => {
+      const { tr } = state;
+      const order = parseInt(match[2]);
+      
+      // Create a list item with a paragraph inside
+      const listItem = documentSchema.nodes.list_item.create(
+        null,
+        documentSchema.nodes.paragraph.create()
+      );
+      
+      // Create an ordered list containing the list item
+      const orderedList = documentSchema.nodes.ordered_list.create({ order }, listItem);
+      
+      // Replace the current block with the ordered list
+      const $start = tr.doc.resolve(start);
+      const blockStart = $start.before($start.depth);
+      tr.replaceWith(blockStart, end, orderedList);
+      
+      // Set cursor position inside the list item
+      const pos = blockStart + 3; // +1 for ordered_list, +1 for list_item, +1 for paragraph
+      tr.setSelection(state.selection.constructor.near(tr.doc.resolve(pos)));
+      
+      return tr;
+    }
+  );
+}
+
+export function buildListKeymap(): Plugin {
+  return keymap({
+    'Enter': splitListItem(documentSchema.nodes.list_item),
+    'Shift-Tab': liftListItem(documentSchema.nodes.list_item),
+    'Tab': sinkListItem(documentSchema.nodes.list_item),
+  });
+}
+
 interface HandleTransactionProps {
   transaction: Transaction;
   editorRef: React.MutableRefObject<EditorView | null>;
@@ -128,6 +228,25 @@ export function buildContentFromDocument(doc: ProseMirrorNode): string {
         level: node.attrs.level,
         content: node.textContent
       });
+    } else if (node.type.name === 'bullet_list') {
+      const items: string[] = [];
+      node.content.forEach((listItem) => {
+        items.push(listItem.textContent);
+      });
+      content.push({
+        type: 'bullet_list',
+        items
+      });
+    } else if (node.type.name === 'ordered_list') {
+      const items: string[] = [];
+      node.content.forEach((listItem) => {
+        items.push(listItem.textContent);
+      });
+      content.push({
+        type: 'ordered_list',
+        order: node.attrs.order,
+        items
+      });
     } else if (node.type.name === 'code_block') {
       content.push({
         type: 'code_block',
@@ -157,6 +276,35 @@ export function buildDocumentFromContent(content: string): ProseMirrorNode {
           { level: item.level || 1 },
           documentSchema.text(item.content || '')
         ));
+      } else if (item.type === 'bullet_list') {
+        const listItems: ProseMirrorNode[] = [];
+        if (item.items && Array.isArray(item.items)) {
+          item.items.forEach((itemText: string) => {
+            listItems.push(documentSchema.nodes.list_item.create(
+              null,
+              documentSchema.nodes.paragraph.create(null, documentSchema.text(itemText || ''))
+            ));
+          });
+        }
+        if (listItems.length > 0) {
+          nodes.push(documentSchema.nodes.bullet_list.create(null, listItems));
+        }
+      } else if (item.type === 'ordered_list') {
+        const listItems: ProseMirrorNode[] = [];
+        if (item.items && Array.isArray(item.items)) {
+          item.items.forEach((itemText: string) => {
+            listItems.push(documentSchema.nodes.list_item.create(
+              null,
+              documentSchema.nodes.paragraph.create(null, documentSchema.text(itemText || ''))
+            ));
+          });
+        }
+        if (listItems.length > 0) {
+          nodes.push(documentSchema.nodes.ordered_list.create(
+            { order: item.order || 1 },
+            listItems
+          ));
+        }
       } else if (item.type === 'code_block') {
         nodes.push(documentSchema.nodes.code_block.create(null, documentSchema.text(item.content || '')));
       } else if (item.type === 'blockquote') {
