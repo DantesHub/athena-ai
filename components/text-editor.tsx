@@ -12,6 +12,7 @@ import {
   bulletListRule,
   orderedListRule,
   buildListKeymap,
+  buildAISuggestionPlugin,
   buildContentFromDocument,
   buildDocumentFromContent,
 } from '@/lib/editor/config';
@@ -50,6 +51,7 @@ export function TextEditor({
             ],
           }),
           buildListKeymap(),
+          buildAISuggestionPlugin(),
         ],
       });
 

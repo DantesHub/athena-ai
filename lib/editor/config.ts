@@ -1,7 +1,7 @@
 import { Schema, Node as ProseMirrorNode } from 'prosemirror-model';
 import { InputRule } from 'prosemirror-inputrules';
 import { EditorView } from 'prosemirror-view';
-import { Transaction, Plugin } from 'prosemirror-state';
+import { Transaction, Plugin, PluginKey } from 'prosemirror-state';
 import { keymap } from 'prosemirror-keymap';
 import { 
   splitListItem, 
@@ -83,6 +83,50 @@ export const documentSchema = new Schema({
     },
     text: {
       group: 'inline'
+    },
+    ai_suggestion: {
+      content: 'inline*',
+      group: 'block',
+      attrs: {
+        originalText: { default: '' }
+      },
+      parseDOM: [{
+        tag: 'div[data-ai-suggestion]',
+        getAttrs(dom: HTMLElement) {
+          return { originalText: dom.getAttribute('data-original-text') || '' };
+        }
+      }],
+      toDOM(node) {
+        const header = ['div', { 
+          'class': 'ai-suggestion-header',
+          'contenteditable': 'false'
+        }, node.attrs.originalText];
+        
+        const content = ['div', { 'class': 'ai-suggestion-content' }, 0];
+        
+        const sendButton = ['button', {
+          'class': 'ai-suggestion-button ai-suggestion-send',
+          'contenteditable': 'false',
+          'title': 'Send'
+        }, '→'];
+        
+        const closeButton = ['button', {
+          'class': 'ai-suggestion-button ai-suggestion-close',
+          'contenteditable': 'false',
+          'title': 'Close'
+        }, '×'];
+        
+        const buttons = ['div', { 
+          'class': 'ai-suggestion-buttons',
+          'contenteditable': 'false'
+        }, sendButton, closeButton];
+        
+        return ['div', {
+          'data-ai-suggestion': 'true',
+          'data-original-text': node.attrs.originalText,
+          'class': 'ai-suggestion-block'
+        }, header, content, buttons];
+      }
     },
     hard_break: {
       inline: true,
@@ -183,11 +227,144 @@ export function orderedListRule(): InputRule {
   );
 }
 
+function getPreviousBlockText(state: any): string {
+  const { $from } = state.selection;
+  const currentBlock = $from.parent;
+  
+  // Get text content of current block
+  return currentBlock.textContent.trim();
+}
+
+function handleSpace(state: any, dispatch: any): boolean {
+  const { $from, empty } = state.selection;
+  
+  // Only handle when selection is empty
+  if (!empty) return false;
+  
+  // Check if current line is completely empty
+  const currentBlock = $from.parent;
+  if (currentBlock.content.size !== 0) return false;
+  
+  // Don't trigger if we're already in an AI suggestion
+  if (currentBlock.type.name === 'ai_suggestion') return false;
+  
+  // Get the previous block's text (the block before the empty line)
+  let previousBlockText = '';
+  const blockBefore = $from.doc.resolve($from.before()).nodeBefore;
+  if (blockBefore) {
+    previousBlockText = blockBefore.textContent.trim();
+  }
+  
+  // Don't create suggestion if there's no previous text
+  if (!previousBlockText) return false;
+  
+  if (dispatch) {
+    // Replace the current empty block with an AI suggestion (with empty content)
+    const aiSuggestion = documentSchema.nodes.ai_suggestion.create(
+      { originalText: previousBlockText }
+      // Empty content - user will type in the content area
+    );
+    
+    const from = $from.before();
+    const to = $from.after();
+    const tr = state.tr.replaceWith(from, to, aiSuggestion);
+    
+    // Set cursor inside the content area of the AI suggestion
+    const newPos = from + 1;
+    tr.setSelection(state.selection.constructor.near(tr.doc.resolve(newPos)));
+    
+    dispatch(tr);
+  }
+  
+  return true;
+}
+
+function handleEscape(state: any, dispatch: any): boolean {
+  const { $from } = state.selection;
+  
+  // Check if we're in an AI suggestion block
+  if ($from.parent.type.name === 'ai_suggestion') {
+    if (dispatch) {
+      // Find the AI suggestion block position
+      const $pos = state.doc.resolve($from.before());
+      const from = $pos.pos;
+      const to = $pos.after();
+      
+      // Delete the AI suggestion block
+      const tr = state.tr.delete(from, to);
+      dispatch(tr);
+    }
+    return true;
+  }
+  
+  return false;
+}
+
 export function buildListKeymap(): Plugin {
   return keymap({
     'Enter': splitListItem(documentSchema.nodes.list_item),
     'Shift-Tab': liftListItem(documentSchema.nodes.list_item),
     'Tab': sinkListItem(documentSchema.nodes.list_item),
+    'Space': handleSpace,
+    'Escape': handleEscape,
+  });
+}
+
+export function buildAISuggestionPlugin(): Plugin {
+  return new Plugin({
+    key: new PluginKey('aiSuggestion'),
+    props: {
+      handleDOMEvents: {
+        click(view, event) {
+          const target = event.target as HTMLElement;
+          
+          // Check if clicked on close button
+          if (target.closest('.ai-suggestion-close')) {
+            const suggestionBlock = target.closest('.ai-suggestion-block');
+            if (suggestionBlock) {
+              const pos = view.posAtDOM(suggestionBlock, 0);
+              const $pos = view.state.doc.resolve(pos);
+              const from = $pos.before();
+              const to = $pos.after();
+              
+              // Replace with empty paragraph
+              const tr = view.state.tr.replaceWith(from, to, documentSchema.nodes.paragraph.create());
+              view.dispatch(tr);
+              view.focus();
+              return true;
+            }
+          }
+          
+          // Check if clicked on send button
+          if (target.closest('.ai-suggestion-send')) {
+            const suggestionBlock = target.closest('.ai-suggestion-block');
+            if (suggestionBlock) {
+              const pos = view.posAtDOM(suggestionBlock, 0);
+              const $pos = view.state.doc.resolve(pos);
+              const node = $pos.parent;
+              
+              // Get the content of the suggestion
+              const content = node.textContent;
+              
+              // Replace with a regular paragraph containing the content
+              const from = $pos.before();
+              const to = $pos.after();
+              const paragraph = documentSchema.nodes.paragraph.create(
+                null,
+                content ? documentSchema.text(content) : null
+              );
+              
+              const tr = view.state.tr.replaceWith(from, to, paragraph);
+              view.dispatch(tr);
+              view.focus();
+              return true;
+            }
+          }
+          
+          return false;
+        }
+      }
+    }
   });
 }
 
@@ -257,6 +434,12 @@ export function buildContentFromDocument(doc: ProseMirrorNode): string {
         type: 'blockquote',
         content: node.textContent
       });
+    } else if (node.type.name === 'ai_suggestion') {
+      content.push({
+        type: 'ai_suggestion',
+        content: node.textContent,
+        originalText: node.attrs.originalText
+      });
     }
   });
   
@@ -311,6 +494,11 @@ export function buildDocumentFromContent(content: string): ProseMirrorNode {
         nodes.push(documentSchema.nodes.blockquote.create(
           null,
           documentSchema.nodes.paragraph.create(null, documentSchema.text(item.content || ''))
+        ));
+      } else if (item.type === 'ai_suggestion') {
+        nodes.push(documentSchema.nodes.ai_suggestion.create(
+          { originalText: item.originalText || '' },
+          documentSchema.text(item.content || '')
         ));
       }
     });

@@ -146,3 +146,110 @@ body {
 .ProseMirror ol ul {
   margin: 0.25rem 0;
 }
+
+/* AI Suggestion Block */
+.ProseMirror .ai-suggestion-block {
+  position: relative;
+  margin: 0.5rem 0;
+  padding: 0;
+  background-color: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+.ProseMirror .ai-suggestion-block::before {
+  content: '';
+  position: absolute;
+  left: 0.75rem;
+  top: 0.875rem;
+  width: 1.25rem;
+  height: 1.25rem;
+  background-color: #9ca3af;
+  border-radius: 50%;
+  opacity: 0.5;
+  z-index: 1;
+}
+
+.ProseMirror .ai-suggestion-header {
+  padding: 0.75rem 1rem 0.25rem 2.5rem;
+  font-weight: 600;
+  color: #374151;
+  user-select: none;
+  cursor: default;
+}
+
+.ProseMirror .ai-suggestion-content {
+  padding: 0 3rem 0.75rem 2.5rem;
+  color: #6b7280;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  min-height: 1.5rem;
+  outline: none;
+}
+
+.ProseMirror .ai-suggestion-buttons {
+  position: absolute;
+  right: 0.5rem;
+  bottom: 0.5rem;
+  display: flex;
+  gap: 0.25rem;
+}
+
+.ProseMirror .ai-suggestion-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid #e5e7eb;
+  border-radius: 0.375rem;
+  color: #6b7280;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-size: 18px;
+  line-height: 1;
+  font-weight: 500;
+}
+
+.ProseMirror .ai-suggestion-button:hover {
+  background-color: #f3f4f6;
+  color: #374151;
+  border-color: #d1d5db;
+}
+
+.ProseMirror .ai-suggestion-close {
+  font-size: 20px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .ProseMirror .ai-suggestion-block {
+    background-color: #1f2937;
+    border-color: #374151;
+  }
+  
+  .ProseMirror .ai-suggestion-block::before {
+    background-color: #6b7280;
+  }
+  
+  .ProseMirror .ai-suggestion-header {
+    color: #e5e7eb;
+  }
+  
+  .ProseMirror .ai-suggestion-content {
+    color: #9ca3af;
+  }
+  
+  .ProseMirror .ai-suggestion-button {
+    border-color: #374151;
+    color: #9ca3af;
+  }
+  
+  .ProseMirror .ai-suggestion-button:hover {
+    background-color: #374151;
+    color: #e5e7eb;
+    border-color: #4b5563;
+  }
+}
