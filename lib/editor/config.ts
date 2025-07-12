@@ -310,10 +310,47 @@ export function buildListKeymap(): Plugin {
   });
 }
 
-export function buildAISuggestionPlugin(): Plugin {
+export function buildAISuggestionPlugin(onOpenChat?: (message: string) => void): Plugin {
   return new Plugin({
     key: new PluginKey('aiSuggestion'),
     props: {
+      handleKeyDown(view, event) {
+        // Handle Enter key in AI suggestion
+        if (event.key === 'Enter' && !event.shiftKey) {
+          const { $from } = view.state.selection;
+          
+          if ($from.parent.type.name === 'ai_suggestion') {
+            event.preventDefault();
+            
+            const node = $from.parent;
+            const content = node.textContent.trim();
+            
+            if (content && onOpenChat) {
+              // Get the position of the AI suggestion block
+              const pos = view.posAtDOM($from.node(1).domNode as Node, 0);
+              const $pos = view.state.doc.resolve(pos);
+              const from = $pos.before();
+              const to = $pos.after();
+              
+              // Replace with a regular paragraph
+              const paragraph = documentSchema.nodes.paragraph.create(
+                null,
+                content ? documentSchema.text(content) : null
+              );
+              
+              const tr = view.state.tr.replaceWith(from, to, paragraph);
+              view.dispatch(tr);
+              
+              // Open chat with the content
+              onOpenChat(content);
+            }
+            
+            return true;
+          }
+        }
+        
+        return false;
+      },
       handleDOMEvents: {
         click(view, event) {
           const target = event.target as HTMLElement;
@@ -344,7 +381,7 @@ export function buildAISuggestionPlugin(): Plugin {
               const node = $pos.parent;
               
               // Get the content of the suggestion
-              const content = node.textContent;
+              const content = node.textContent.trim();
               
               // Replace with a regular paragraph containing the content
               const from = $pos.before();
@@ -356,6 +393,12 @@ export function buildAISuggestionPlugin(): Plugin {
               
               const tr = view.state.tr.replaceWith(from, to, paragraph);
               view.dispatch(tr);
+              
+              // Open chat with the content
+              if (content && onOpenChat) {
+                onOpenChat(content);
+              }
+              
               view.focus();
               return true;
             }

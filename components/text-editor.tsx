@@ -16,26 +16,50 @@ import {
   buildContentFromDocument,
   buildDocumentFromContent,
 } from '@/lib/editor/config';
+import { useEditorPersistence } from '@/hooks/use-editor-persistence';
 
 interface TextEditorProps {
+  workspaceId?: string;
+  nodeId?: string;
   initialContent?: string;
   onSave?: (content: string) => void;
   placeholder?: string;
+  onOpenChat?: (message: string) => void;
 }
 
 export function TextEditor({ 
+  workspaceId,
+  nodeId,
   initialContent = '[]', 
   onSave,
-  placeholder = "Type '/' for commands..."
+  placeholder = "Type '/' for commands...",
+  onOpenChat
 }: TextEditorProps) {
+  console.log('📝 TextEditor: Rendered with workspaceId:', workspaceId, 'nodeId:', nodeId);
   const containerRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<EditorView | null>(null);
   const [title, setTitle] = useState('Untitled');
+  
+  const { currentNode, saveContent, isWorkspaceReady } = useEditorPersistence({
+    workspaceId,
+    nodeId,
+  });
+  
+  console.log('📃 TextEditor: Persistence hook state:', {
+    isWorkspaceReady,
+    hasCurrentNode: !!currentNode,
+    currentNodeId: currentNode?.id
+  });
 
   useEffect(() => {
     if (containerRef.current && !editorRef.current) {
+      // Use content from Firestore if available, otherwise use initialContent
+      const content = currentNode?.content 
+        ? JSON.stringify(currentNode.content)
+        : initialContent;
+        
       const state = EditorState.create({
-        doc: buildDocumentFromContent(initialContent),
+        doc: buildDocumentFromContent(content),
         plugins: [
           ...exampleSetup({ schema: documentSchema, menuBar: false }),
           inputRules({
@@ -51,7 +75,7 @@ export function TextEditor({
             ],
           }),
           buildListKeymap(),
-          buildAISuggestionPlugin(),
+          buildAISuggestionPlugin(onOpenChat),
         ],
       });
 
@@ -62,6 +86,11 @@ export function TextEditor({
             transaction,
             editorRef,
             onSaveContent: (content: string) => {
+              // Save to Firestore if workspace is ready
+              if (isWorkspaceReady) {
+                saveContent(content, title);
+              }
+              // Also call the prop callback if provided
               if (onSave) {
                 onSave(content);
               }
@@ -77,7 +106,7 @@ export function TextEditor({
         editorRef.current = null;
       }
     };
-  }, []);
+  }, [onOpenChat, initialContent, onSave]);
 
   return (
     <div className="flex-1 h-full overflow-y-auto">
