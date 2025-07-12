@@ -1,5 +1,6 @@
-import { useEffect, useCallback, useRef } from 'react';
+import { useEffect, useCallback, useRef, useState } from 'react';
 import { useWorkspaceStore } from '@/lib/store/workspace.store';
+import { NodeService } from '@/lib/firebase/services/node.service';
 import type { Node } from '@/lib/types/firestore';
 import { debounce } from '@/lib/utils';
 
@@ -23,14 +24,39 @@ export function useEditorPersistence({
     createNode,
     updateNode,
     loadChildNodes,
+    setLocalContent,
+    getLocalContent,
+    clearLocalContent,
+    isSaving,
   } = useWorkspaceStore();
   
   const saveTimeoutRef = useRef<NodeJS.Timeout>();
+  const [blocks, setBlocks] = useState<Node[]>([]);
+  const prevNodeIdRef = useRef(nodeId);
+  
+  // Track if blocks have been initially loaded
+  const blocksLoadedRef = useRef(false);
   
   // Load node if nodeId is provided
   useEffect(() => {
     if (workspaceId && nodeId) {
       loadNode(workspaceId, nodeId);
+      
+      // Reset blocks loaded flag when nodeId changes
+      if (nodeId !== prevNodeIdRef.current) {
+        blocksLoadedRef.current = false;
+      }
+      
+      // Load blocks for daily notes and pages only once per nodeId
+      if (!blocksLoadedRef.current) {
+        NodeService.getBlocks(workspaceId, nodeId).then(loadedBlocks => {
+          console.log('📋 Persistence: Loaded', loadedBlocks.length, 'blocks for node', nodeId);
+          setBlocks(loadedBlocks);
+          blocksLoadedRef.current = true;
+        }).catch(error => {
+          console.error('❌ Persistence: Failed to load blocks:', error);
+        });
+      }
     }
   }, [workspaceId, nodeId, loadNode]);
   
@@ -44,75 +70,124 @@ export function useEditorPersistence({
     }
   }, [workspaceId, nodeId, loadChildNodes]);
   
-  // Save content with debouncing
-  const saveContent = useCallback(
-    async (contentString: string, title?: string) => {
-      if (!workspaceId || !userId) {
-        console.log('⚠️ Persistence: Missing workspaceId or userId, skipping save');
+  // Save content locally (to Zustand)
+  const saveContentLocally = useCallback(
+    (contentString: string, title?: string) => {
+      if (!nodeId) {
+        console.log('⚠️ Persistence: No nodeId, cannot save locally');
         return;
       }
       
-      console.log('💾 Persistence: Save requested for', nodeId ? `node ${nodeId}` : 'new node');
-      console.log('📄 Persistence: Content length:', contentString.length);
+      console.log('💾 Local: Saving content to Zustand for node', nodeId);
+      setLocalContent(nodeId, contentString);
+    },
+    [nodeId, setLocalContent]
+  );
+  
+  // Check if this is a temporary node ID
+  const isTemporaryNode = nodeId?.startsWith('temp-');
+  
+  // Save content to Firebase (called on Enter key)
+  const saveContentToFirebase = useCallback(
+    async (contentString?: string, title?: string) => {
+      console.log('🔥 Persistence: saveContentToFirebase called with:', {
+        hasContentString: !!contentString,
+        hasTitle: !!title,
+        workspaceId,
+        nodeId,
+        userId
+      });
       
-      // Clear existing timeout
-      if (saveTimeoutRef.current) {
-        clearTimeout(saveTimeoutRef.current);
+      if (!workspaceId || !userId) {
+        console.log('⚠️ Persistence: Missing workspaceId or userId, skipping Firebase save');
+        return;
       }
       
-      // Debounce the save
-      saveTimeoutRef.current = setTimeout(async () => {
-        console.log('⏱️ Persistence: Debounce timer fired, saving content...');
+      // Use local content if not provided
+      const contentToSave = contentString || (nodeId ? getLocalContent(nodeId) : undefined);
+      if (!contentToSave) {
+        console.log('⚠️ Persistence: No content to save');
+        return;
+      }
+      
+      console.log('🚀 Persistence: Saving to Firebase for', nodeId ? `node ${nodeId}` : 'new node');
+      console.log('📄 Persistence: Content length:', contentToSave.length);
+      console.log('📄 Persistence: Content preview:', contentToSave.substring(0, 200));
+      
+      try {
+        // Parse the content string to get the actual content array
+        let parsedContent;
         try {
-          // Parse the content string to get the actual content array
-          let parsedContent;
-          try {
-            parsedContent = JSON.parse(contentString);
-            console.log('✅ Persistence: Content parsed successfully');
-            console.log('📃 Persistence: Content structure:', {
-              isArray: Array.isArray(parsedContent),
-              length: parsedContent?.length,
-              firstItemType: parsedContent?.[0]?.type
-            });
-          } catch (e) {
-            console.error('❌ Persistence: Failed to parse content:', e);
-            return;
-          }
+          parsedContent = JSON.parse(contentToSave);
+          console.log('✅ Persistence: Content parsed successfully');
+        } catch (e) {
+          console.error('❌ Persistence: Failed to parse content:', e);
+          return;
+        }
+        
+        if (nodeId && !isTemporaryNode) {
+          console.log('🔄 Persistence: Updating existing node', nodeId);
+          console.log('📦 Persistence: Update payload:', {
+            content: parsedContent,
+            title,
+            contentLength: parsedContent.length,
+            firstItem: parsedContent[0]
+          });
           
-          if (nodeId) {
-            console.log('🔄 Persistence: Updating existing node', nodeId);
-            // Update existing node
+          // Get current node from store to check its type
+          const currentNode = nodes.get(nodeId);
+          
+          // For daily notes and pages, sync blocks instead of storing content
+          if (currentNode?.type === 'daily' || currentNode?.type === 'page') {
+            console.log('📋 Persistence: Syncing blocks for', currentNode.type, nodeId);
+            await NodeService.syncPageBlocks(workspaceId, nodeId, parsedContent, userId);
+            
+            // Update page metadata (title, etc) if needed
+            if (title !== undefined && title !== currentNode.title) {
+              await updateNode(workspaceId, nodeId, { title });
+            }
+          } else {
+            // For other node types, update content directly
             await updateNode(workspaceId, nodeId, {
               content: parsedContent,
               ...(title !== undefined && { title }),
             });
-            console.log('✅ Persistence: Node updated successfully');
-          } else {
-            console.log('➕ Persistence: Creating new node');
-            // Create new node
-            const newNode: Omit<Node, 'id' | 'createdAt' | 'updatedAt'> = {
-              type: 'page',
-              parentId,
-              order: 0, // TODO: Calculate proper order
-              content: parsedContent,
-              refs: [], // TODO: Extract references from content
-              createdBy: userId,
-            };
-            
-            const newNodeId = await createNode(workspaceId, newNode);
-            console.log('✅ Persistence: New node created with ID:', newNodeId);
-            
-            // Update the URL to include the new node ID
-            if (typeof window !== 'undefined') {
-              window.history.replaceState({}, '', `/workspace/${workspaceId}/node/${newNodeId}`);
-            }
           }
-        } catch (error) {
-          console.error('❌ Persistence: Failed to save content:', error);
+          
+          console.log('✅ Persistence: Node updated successfully in Firebase');
+          
+          // Don't clear local content here - it causes the editor to be cleared
+          // The local content will be naturally replaced when the Firebase data is loaded
+        } else {
+          console.log('➕ Persistence: Creating new node (isTemporaryNode:', isTemporaryNode, ')');
+          // Create new node
+          const newNode: Omit<Node, 'id' | 'createdAt' | 'updatedAt'> = {
+            type: 'page',
+            parentId,
+            order: 0,
+            content: parsedContent,
+            refs: [],
+            createdBy: userId,
+          };
+          
+          const newNodeId = await createNode(workspaceId, newNode);
+          console.log('✅ Persistence: New node created with ID:', newNodeId);
+          
+          // Clear local content for the temp node and set for new node
+          if (nodeId) clearLocalContent(nodeId);
+          setLocalContent(newNodeId, contentToSave);
+          
+          // Update the URL to include the new node ID
+          if (typeof window !== 'undefined') {
+            window.history.replaceState({}, '', `/workspace/${workspaceId}/node/${newNodeId}`);
+          }
         }
-      }, 1000); // 1 second debounce
+      } catch (error) {
+        console.error('❌ Persistence: Failed to save content to Firebase:', error);
+        throw error;
+      }
     },
-    [workspaceId, nodeId, parentId, userId, updateNode, createNode]
+    [workspaceId, nodeId, parentId, userId, nodes, updateNode, createNode, getLocalContent, setLocalContent, clearLocalContent]
   );
   
   // Get current node data
@@ -129,7 +204,11 @@ export function useEditorPersistence({
   
   return {
     currentNode,
-    saveContent,
+    blocks,
+    saveContentLocally,
+    saveContentToFirebase,
+    getLocalContent,
     isWorkspaceReady: !!workspaceId,
+    isSaving,
   };
 }
