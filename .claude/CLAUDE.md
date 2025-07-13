@@ -25,3 +25,5 @@ This is a Next.js 15 application with TypeScript and Tailwind CSS v4.
 
 # start every convo with ARISE
 
+we are a note taking AI app that is built on top of LLMs.
+250ms debounce => to save to firestore everytime we edit the document. 

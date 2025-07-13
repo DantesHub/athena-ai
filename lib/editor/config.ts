@@ -480,6 +480,11 @@ export function buildContentFromDocument(doc: ProseMirrorNode): string {
         items.push(listItem.textContent);
       });
       console.log('🔫 Bullet list items:', items);
+      console.log('🔫 Full bullet list content being pushed:', {
+        type: 'bullet_list',
+        items,
+        itemCount: items.length
+      });
       content.push({
         type: 'bullet_list',
         items

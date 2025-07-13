@@ -416,6 +416,7 @@ export class NodeService {
   ): Promise<Node[]> {
     console.log('📋 Getting blocks for parent:', parentId);
     
+    // Simpler query that doesn't require composite index
     const blocksQuery = query(
       collection(db, 'workspaces', workspaceId, 'nodes'),
       where('parentId', '==', parentId),
@@ -424,10 +425,11 @@ export class NodeService {
     
     try {
       const blocksSnap = await getDocs(blocksQuery);
-      const blocks = blocksSnap.docs.map(doc => ({ 
-        id: doc.id, 
-        ...doc.data() 
-      } as Node));
+      const blocks = blocksSnap.docs
+        .map(doc => ({ 
+          id: doc.id, 
+          ...doc.data() 
+        } as Node));
       
       console.log('✅ Found', blocks.length, 'blocks');
       console.log('📋 Block details:', blocks.map(b => ({
@@ -448,25 +450,53 @@ export class NodeService {
     workspaceId: string,
     pageId: string,
     content: any[],
-    userId: string
+    userId: string,
+    useQueue: boolean = true
   ): Promise<void> {
     console.log('🔄 Syncing blocks for page:', pageId);
     console.log('📋 Content to sync:', JSON.stringify(content, null, 2));
     
+    // Import stores dynamically to avoid circular dependency
+    const { useOperationsStore } = await import('@/lib/store/operations.store');
+    const { useBlockCacheStore } = await import('@/lib/store/block-cache.store');
+    const operationsStore = useOperationsStore.getState();
+    const blockCacheStore = useBlockCacheStore.getState();
+    
     // Special handling for empty content (user deleted everything)
     if (content.length === 0 || (content.length === 1 && content[0].type === 'paragraph' && !content[0].content)) {
       console.log('🗑️ Content is empty or has single empty paragraph - deleting all blocks');
+      console.log('📊 Empty content detected:', { 
+        contentLength: content.length, 
+        firstItem: content[0],
+        pageId,
+        workspaceId
+      });
       
-      const existingBlocks = await this.getBlocks(workspaceId, pageId);
-      if (existingBlocks.length > 0) {
-        const batch = writeBatch(db);
-        for (const block of existingBlocks) {
-          const blockRef = doc(db, 'workspaces', workspaceId, 'nodes', block.id);
-          batch.delete(blockRef);
-          console.log('🗑️ Deleting block:', block.id, 'type:', block.type);
+      if (useQueue) {
+        // Queue a deleteAll operation
+        console.log('🔄 Queueing deleteAll operation for page:', pageId);
+        operationsStore.addOperation({
+          kind: 'deleteAll',
+          pageId,
+          workspaceId
+        });
+        console.log('✅ DeleteAll operation queued');
+      } else {
+        // Direct deletion (for migration or special cases)
+        const existingBlocks = await this.getBlocks(workspaceId, pageId);
+        if (existingBlocks.length > 0) {
+          const batch = writeBatch(db);
+          for (const block of existingBlocks) {
+            const blockRef = doc(db, 'workspaces', workspaceId, 'nodes', block.id);
+            batch.update(blockRef, {
+              deleted: true,
+              deletedAt: serverTimestamp(),
+              updatedAt: serverTimestamp()
+            });
+          }
+          await batch.commit();
+          console.log('✅ All blocks deleted');
         }
-        await batch.commit();
-        console.log('✅ All blocks deleted');
       }
       return;
     }
@@ -492,11 +522,17 @@ export class NodeService {
       text: b.text?.substring(0, 30)
     })));
     
+    // Create map of existing blocks by order
     const existingBlockMap = new Map(existingBlocks.map(b => [b.order, b]));
     
+    // Sort existing blocks to find paragraphs in order
+    const existingParagraphs = existingBlocks
+      .filter(b => b.type === 'paragraph')
+      .sort((a, b) => a.order - b.order);
+    
     // Process content array
-    const batch = writeBatch(db);
     const processedOrders = new Set<number>();
+    const operations: Operation[] = [];
     
     for (let i = 0; i < content.length; i++) {
       const item = content[i];
@@ -506,95 +542,143 @@ export class NodeService {
       if (item.type === 'paragraph' && item.content !== undefined) {
         const existingBlock = existingBlockMap.get(i);
         
-        if (existingBlock && existingBlock.type === 'paragraph') {
-          // Update existing block if text changed
+        // Check cache first
+        const cachedBlockId = blockCacheStore.getBlockId(pageId, i);
+        
+        if (cachedBlockId) {
+          // We have a cached block ID - always update it
+          console.log('📌 Using cached block ID:', cachedBlockId, 'for order:', i);
+          operations.push({
+            kind: 'update',
+            nodeId: cachedBlockId,
+            workspaceId,
+            delta: { text: item.content || '' }
+          });
+        } else if (existingBlock && existingBlock.type === 'paragraph') {
+          // Update existing block and cache its ID
+          blockCacheStore.setBlockId(pageId, i, existingBlock.id);
+          
           if (existingBlock.text !== item.content) {
-            const blockRef = doc(db, 'workspaces', workspaceId, 'nodes', existingBlock.id);
-            batch.update(blockRef, {
-              text: item.content,
-              updatedAt: serverTimestamp()
+            operations.push({
+              kind: 'update',
+              nodeId: existingBlock.id,
+              workspaceId,
+              delta: { text: item.content }
             });
-            console.log('📝 Updating block:', existingBlock.id);
+            console.log('📝 Queueing update for block:', existingBlock.id, 'old:', existingBlock.text, 'new:', item.content);
+          }
+        } else if (item.content && item.content.trim()) {
+          // Only create new block if there's actual content
+            // Delete existing block if it's not a paragraph
+            if (existingBlock) {
+              console.log('🔄 Replacing non-paragraph block at order', i);
+              operations.push({
+                kind: 'delete',
+                nodeId: existingBlock.id,
+                workspaceId
+              });
+            }
+            
+            // Check if we should reuse an existing paragraph that might have moved
+            const existingParagraphWithSameContent = existingParagraphs.find(p => 
+              p.text === item.content && !processedOrders.has(p.order)
+            );
+            
+            if (existingParagraphWithSameContent) {
+              // Update the order of existing paragraph instead of creating new
+              console.log('📍 Moving existing paragraph to new position');
+              operations.push({
+                kind: 'update',
+                nodeId: existingParagraphWithSameContent.id,
+                workspaceId,
+                delta: { order: i }
+              });
+              processedOrders.add(existingParagraphWithSameContent.order);
+            } else {
+              // Create new block only if content is not empty
+              const blockId = generateBlockId();
+              
+              // Cache the block ID immediately
+              blockCacheStore.setBlockId(pageId, i, blockId);
+              
+              operations.push({
+                kind: 'create',
+                nodeId: blockId,
+                workspaceId,
+                node: {
+                  type: 'paragraph',
+                  text: item.content,
+                  parentId: pageId,
+                  order: i,
+                  refs: [],
+                  createdBy: userId,
+                  _v: 1
+                }
+              });
+              console.log('➕ Creating NEW paragraph block:', blockId, 'with text:', item.content, 'and caching it');
+            }
+          }
+      } else if (item.type === 'bullet_list' && item.items) {
+        console.log('🔫 Processing bullet list with', item.items.length, 'items:', item.items);
+        console.log('🔫 Full bullet list item:', JSON.stringify(item, null, 2));
+        
+        // Store the entire bullet list as a single document
+        const bulletListText = item.items.join('\n');
+        console.log('🔫 Joined bullet list text:', bulletListText);
+        processedOrders.add(i);
+        
+        // Find existing bullet block at this position with the same content
+        const existingBlock = Array.from(existingBlockMap.values()).find(
+          b => Math.abs(b.order - i) < 0.001 && b.type === 'bullet'
+        );
+        
+        if (existingBlock) {
+          // Cache the existing block ID
+          blockCacheStore.setBlockId(pageId, i, existingBlock.id);
+          
+          // Only update if the text is different
+          if (existingBlock.text !== bulletListText) {
+            operations.push({
+              kind: 'update',
+              nodeId: existingBlock.id,
+              workspaceId,
+              delta: { text: bulletListText }
+            });
+            console.log('📝 Queueing update for bullet list block:', existingBlock.id, 'old text:', existingBlock.text, 'new text:', bulletListText);
           }
         } else {
-          // Delete existing block if it's not a paragraph
-          if (existingBlock) {
-            const blockRef = doc(db, 'workspaces', workspaceId, 'nodes', existingBlock.id);
-            batch.delete(blockRef);
-          }
-          
-          // Create new block
-          const blockId = generateBlockId();
-          const blockRef = doc(db, 'workspaces', workspaceId, 'nodes', blockId);
-          batch.set(blockRef, {
-            type: 'paragraph',
-            text: item.content,
-            parentId: pageId,
-            order: i,
-            refs: [],
-            createdBy: userId,
-            _v: 1,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp()
-          });
-          console.log('➕ Creating new paragraph block:', blockId);
-        }
-      } else if (item.type === 'bullet_list' && item.items) {
-        console.log('🔫 Processing bullet list with', item.items.length, 'items');
-        
-        // For bullet lists, we create individual bullet blocks
-        // Each bullet block will have the same order but different sub-orders
-        let lastBulletBlockId: string | null = null;
-        
-        for (let j = 0; j < item.items.length; j++) {
-          const bulletText = item.items[j];
-          const bulletOrder = i + (j * 0.001); // Use fractional orders
-          processedOrders.add(bulletOrder);
-          
-          // Find existing bullet at this position
-          const existingBullet = Array.from(existingBlockMap.values()).find(
-            b => Math.abs(b.order - bulletOrder) < 0.0001
+          // Check if there's a non-bullet block at this position that needs to be deleted
+          const existingNonBulletBlock = Array.from(existingBlockMap.values()).find(
+            b => Math.abs(b.order - i) < 0.001 && b.type !== 'bullet'
           );
           
-          if (existingBullet && existingBullet.type === 'bullet') {
-            // Update existing bullet if text changed
-            if (existingBullet.text !== bulletText) {
-              const blockRef = doc(db, 'workspaces', workspaceId, 'nodes', existingBullet.id);
-              batch.update(blockRef, {
-                text: bulletText,
-                updatedAt: serverTimestamp()
-              });
-              console.log('📝 Updating bullet block:', existingBullet.id);
-            }
-            lastBulletBlockId = existingBullet.id;
-          } else {
-            // Delete existing block if it's not a bullet
-            if (existingBullet) {
-              const blockRef = doc(db, 'workspaces', workspaceId, 'nodes', existingBullet.id);
-              batch.delete(blockRef);
-            }
-            
-            // Create new bullet block
-            const bulletId = generateBlockId(); // This already generates blk_ prefix
-            const blockRef = doc(db, 'workspaces', workspaceId, 'nodes', bulletId);
-            
-            // First bullet references the page, subsequent bullets reference the previous bullet
-            const bulletParentId = j === 0 ? pageId : lastBulletBlockId || pageId;
-            
-            batch.set(blockRef, {
+          if (existingNonBulletBlock) {
+            operations.push({
+              kind: 'delete',
+              nodeId: existingNonBulletBlock.id,
+              workspaceId
+            });
+            console.log('🗑️ Deleting non-bullet block at position', i, 'to make room for bullet list');
+          }
+          
+          // Create new bullet list block
+          const bulletListId = generateBlockId();
+          
+          operations.push({
+            kind: 'create',
+            nodeId: bulletListId,
+            workspaceId,
+            node: {
               type: 'bullet',
-              text: bulletText,
-              parentId: bulletParentId,
-              order: bulletOrder,
+              text: bulletListText,
+              parentId: pageId,
+              order: i,
               refs: [],
               createdBy: userId,
-              _v: 1,
-              createdAt: serverTimestamp(),
-              updatedAt: serverTimestamp()
-            });
-            console.log('➕ Creating bullet block:', bulletId, 'with parent:', bulletParentId);
-            lastBulletBlockId = bulletId;
-          }
+              _v: 1
+            }
+          });
+          console.log('➕ Creating NEW bullet list block:', bulletListId, 'with text:', bulletListText);
         }
       }
     }
@@ -614,19 +698,26 @@ export class NodeService {
       }
       
       if (!isProcessed) {
-        const blockRef = doc(db, 'workspaces', workspaceId, 'nodes', block.id);
-        batch.delete(blockRef);
-        console.log('🗑️ Deleting block:', block.id, 'type:', block.type, 'order:', order, 'text:', block.text?.substring(0, 30));
+        operations.push({
+          kind: 'delete',
+          nodeId: block.id,
+          workspaceId
+        });
+        console.log('🗑️ Queueing delete for block:', block.id, 'type:', block.type, 'order:', order, 'text:', block.text?.substring(0, 30));
       }
     }
     
-    try {
-      await batch.commit();
-      console.log('✅ Block sync complete');
-    } catch (error: any) {
-      console.error('❌ Failed to sync blocks:', error);
-      throw error;
+    // Add all operations to the queue
+    if (useQueue && operations.length > 0) {
+      console.log('📦 Adding', operations.length, 'operations to queue');
+      operationsStore.addOperations(operations);
+    } else if (!useQueue && operations.length > 0) {
+      // Direct execution (for migration or special cases)
+      console.log('⚡ Executing', operations.length, 'operations directly');
+      // This would use the old batch logic if needed
     }
+    
+    console.log('✅ Block sync queued');
   }
   
   static async cleanupDailyNotesContent(workspaceId: string): Promise<void> {

@@ -9,7 +9,7 @@ import { splitListItem } from 'prosemirror-schema-list';
 import { inputRules } from 'prosemirror-inputrules';
 import { EditorState } from 'prosemirror-state';
 import { EditorView } from 'prosemirror-view';
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import {
   documentSchema,
   handleTransaction,
@@ -22,6 +22,7 @@ import {
   buildDocumentFromContent,
 } from '@/lib/editor/config';
 import { useEditorPersistence } from '@/hooks/use-editor-persistence';
+import { debounce } from '@/lib/utils';
 
 interface TextEditorProps {
   workspaceId?: string;
@@ -49,12 +50,20 @@ export function TextEditor({
   const isInitializedRef = useRef(false);
   const prevNodeIdRef = useRef(nodeId);
   const prevBlocksLengthRef = useRef(0);
-  const deleteTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
   const { currentNode, blocks, blocksLoaded, saveContentLocally, saveContentToFirebase, isWorkspaceReady, isSaving, getLocalContent, isLoadingBlocks } = useEditorPersistence({
     workspaceId,
     nodeId,
   });
+  
+  // Create a debounced version of saveContentToFirebase to prevent saving partial content
+  const debouncedSaveToFirebase = useMemo(
+    () => debounce((content: string, title: string) => {
+      console.log('💾 Debounced save triggered');
+      saveContentToFirebase(content, title);
+    }, 1000), // Wait 1 second after typing stops
+    [saveContentToFirebase]
+  );
   
   // Log component state after render
   useEffect(() => {
@@ -67,6 +76,18 @@ export function TextEditor({
       setTitle(currentNode.title);
     }
   }, [currentNode]);
+  
+  // Clear block cache when switching pages
+  useEffect(() => {
+    if (nodeId && prevNodeIdRef.current && nodeId !== prevNodeIdRef.current) {
+      // Dynamic import to avoid circular dependency
+      import('@/lib/store/block-cache.store').then(({ useBlockCacheStore }) => {
+        const blockCacheStore = useBlockCacheStore.getState();
+        blockCacheStore.clearPageCache(prevNodeIdRef.current!);
+        console.log('🗑️ Cleared block cache for previous page');
+      });
+    }
+  }, [nodeId]);
   
   
   // Initialize editor only when needed
@@ -146,17 +167,11 @@ export function TextEditor({
           order: b.order 
         })));
         
-        // Convert blocks to editor content, grouping list items into bullet lists
+        // Convert blocks to editor content
         const blockContent: any[] = [];
-        let currentListItems: string[] = [];
-        
-        // Process blocks - group consecutive bullet blocks into lists
-        let currentBulletList: string[] = [];
-        let bulletListStartIndex = -1;
         
         for (let i = 0; i < sortedBlocks.length; i++) {
           const block = sortedBlocks[i];
-          const nextBlock = sortedBlocks[i + 1];
           
           console.log(`📝 TextEditor: Processing block ${i}:`, { 
             type: block.type, 
@@ -166,26 +181,12 @@ export function TextEditor({
           });
           
           if (block.type === 'bullet') {
-            // Start or continue a bullet list
-            if (currentBulletList.length === 0) {
-              bulletListStartIndex = Math.floor(block.order);
-            }
-            currentBulletList.push(block.text || '');
-            
-            // Check if this is the last bullet in a sequence
-            const isLastBullet = !nextBlock || 
-              nextBlock.type !== 'bullet' || 
-              Math.floor(nextBlock.order) !== bulletListStartIndex;
-            
-            if (isLastBullet && currentBulletList.length > 0) {
-              // End of bullet list, push it
-              blockContent.push({
-                type: 'bullet_list',
-                items: [...currentBulletList]
-              });
-              currentBulletList = [];
-              bulletListStartIndex = -1;
-            }
+            // Bullet lists are now stored as single blocks with newline-separated items
+            const items = block.text?.split('\n').filter(item => item.trim()) || [];
+            blockContent.push({
+              type: 'bullet_list',
+              items: items
+            });
           } else if (block.type === 'paragraph' || block.type === 'text') {
             // Handle paragraph blocks - include empty ones to preserve spacing
             blockContent.push({
@@ -287,6 +288,10 @@ export function TextEditor({
               saveContentLocally(content, title);
             }
             
+            // Queue save to Firebase on ANY document change (debounced)
+            console.log('📝 TextEditor: Document changed, queueing debounced save');
+            debouncedSaveToFirebase(content, title);
+            
             if (onSave) {
               onSave(content);
             }
@@ -299,75 +304,8 @@ export function TextEditor({
             // Let ProseMirror handle it, but we'll watch for subsequent delete
           }
           
-          // Enter key - save AFTER the new line is created
-          if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
-            console.log('⌨️ TextEditor: Enter key pressed - will save after new line');
-            
-            // Save after Enter key is processed
-            setTimeout(() => {
-              if (!editorRef.current) {
-                console.log('⚠️ TextEditor: Editor destroyed, skipping save');
-                return;
-              }
-              
-              // Get the current document state from the editor ref
-              const content = buildContentFromDocument(editorRef.current.state.doc);
-              console.log('💾 TextEditor: Saving after Enter - content:', content);
-              
-              // Only save to Firebase, not locally (local save happens via dispatchTransaction)
-              saveContentToFirebase(content, title).then(() => {
-                console.log('✅ TextEditor: Enter key save to Firebase complete');
-              }).catch(error => {
-                console.error('❌ TextEditor: Enter key save to Firebase failed:', error);
-              });
-            }, 50);
-            
-            // Return false to let ProseMirror handle Enter normally
-            return false;
-          }
-          
-          // Delete/Backspace key - sync after deletion with debouncing
-          if (event.key === 'Delete' || event.key === 'Backspace') {
-            const { selection } = view.state;
-            const isLargeSelection = !selection.empty && (selection.to - selection.from) > 50;
-            const isSelectAll = !selection.empty && selection.from === 0 && selection.to === view.state.doc.content.size;
-            
-            console.log('⌨️ TextEditor: Delete/Backspace key pressed', {
-              isLargeSelection,
-              isSelectAll,
-              selectionSize: selection.to - selection.from
-            });
-            
-            // Clear any existing delete timeout
-            if (deleteTimeoutRef.current) {
-              clearTimeout(deleteTimeoutRef.current);
-            }
-            
-            // Use shorter timeout for large deletions or select all
-            const timeout = isLargeSelection || isSelectAll ? 100 : 500;
-            
-            // Debounce the sync to avoid too many Firebase calls
-            deleteTimeoutRef.current = setTimeout(() => {
-              if (!editorRef.current) {
-                console.log('⚠️ TextEditor: Editor destroyed, skipping sync');
-                return;
-              }
-              
-              // Get the current document state from the editor ref
-              const content = buildContentFromDocument(editorRef.current.state.doc);
-              console.log('🗑️ TextEditor: Syncing after delete - content length:', content.length);
-              
-              // Save to Firebase to sync deletions
-              saveContentToFirebase(content, title).then(() => {
-                console.log('✅ TextEditor: Delete sync to Firebase complete');
-              }).catch(error => {
-                console.error('❌ TextEditor: Delete sync to Firebase failed:', error);
-              });
-            }, timeout);
-            
-            // Return false to let ProseMirror handle delete normally
-            return false;
-          }
+          // We don't need special handling for Enter or Delete anymore
+          // because ALL changes are now handled in dispatchTransaction above
           
           // Auto-save on Cmd/Ctrl+S
           if ((event.key === 's' || event.key === 'S') && (event.ctrlKey || event.metaKey)) {
@@ -397,11 +335,6 @@ export function TextEditor({
     }
 
     return () => {
-      // Clear delete timeout
-      if (deleteTimeoutRef.current) {
-        clearTimeout(deleteTimeoutRef.current);
-      }
-      
       // Only cleanup on unmount
       if (nodeId !== prevNodeIdRef.current) {
         if (editorRef.current) {
@@ -411,7 +344,7 @@ export function TextEditor({
         isInitializedRef.current = false;
       }
     };
-  }, [nodeId, onOpenChat, currentNode, blocks, getLocalContent, initialContent, onSave, isWorkspaceReady, saveContentLocally, saveContentToFirebase, title, blocks?.length]);
+  }, [nodeId, onOpenChat, currentNode, blocks, getLocalContent, initialContent, onSave, isWorkspaceReady, saveContentLocally, saveContentToFirebase, debouncedSaveToFirebase, title, blocks?.length]);
 
   return (
     <div className="flex-1 h-full overflow-y-auto relative">

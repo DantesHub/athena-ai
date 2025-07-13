@@ -17,6 +17,9 @@ interface WorkspaceState {
   // Local content (not persisted to Firebase immediately)
   localContent: Map<string, string>; // nodeId -> content
   
+  // Block ID cache to prevent duplicates
+  blockIdCache: Map<string, Map<number, string>>; // pageId -> (order -> blockId)
+  
   // UI state
   isLoading: boolean;
   error: string | null;
