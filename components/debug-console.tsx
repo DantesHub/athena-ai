@@ -13,11 +13,32 @@ export function DebugConsole() {
     const originalWarn = console.warn;
 
     const addLog = (type: string, ...args: any[]) => {
-      const message = args.map(arg => 
-        typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
-      ).join(' ');
+      const message = args.map(arg => {
+        if (typeof arg === 'object') {
+          try {
+            // Try to stringify with a circular reference handler
+            const seen = new WeakSet();
+            return JSON.stringify(arg, (key, value) => {
+              if (typeof value === 'object' && value !== null) {
+                if (seen.has(value)) {
+                  return '[Circular Reference]';
+                }
+                seen.add(value);
+              }
+              return value;
+            }, 2);
+          } catch (e) {
+            // If it still fails, return a string representation
+            return '[Complex Object]';
+          }
+        }
+        return String(arg);
+      }).join(' ');
       
-      setLogs(prev => [...prev.slice(-100), `[${type}] ${new Date().toLocaleTimeString()}: ${message}`]);
+      // Defer state update to avoid updating during render
+      setTimeout(() => {
+        setLogs(prev => [...prev.slice(-100), `[${type}] ${new Date().toLocaleTimeString()}: ${message}`]);
+      }, 0);
     };
 
     console.log = (...args) => {

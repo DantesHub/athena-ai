@@ -525,6 +525,9 @@ export class NodeService {
     // Create map of existing blocks by order
     const existingBlockMap = new Map(existingBlocks.map(b => [b.order, b]));
     
+    // Track which existing blocks have been matched to prevent reuse
+    const matchedBlockIds = new Set<string>();
+    
     // Sort existing blocks to find paragraphs in order
     const existingParagraphs = existingBlocks
       .filter(b => b.type === 'paragraph')
@@ -536,6 +539,10 @@ export class NodeService {
     
     for (let i = 0; i < content.length; i++) {
       const item = content[i];
+      console.log(`\n🔄 Processing content[${i}]:`, { 
+        type: item.type, 
+        content: item.content?.substring(0, 50) || item.items?.join(', ').substring(0, 50) 
+      });
       processedOrders.add(i);
       
       // Handle different content types
@@ -554,8 +561,9 @@ export class NodeService {
             workspaceId,
             delta: { text: item.content || '' }
           });
-        } else if (existingBlock && existingBlock.type === 'paragraph') {
+        } else if (existingBlock && existingBlock.type === 'paragraph' && !matchedBlockIds.has(existingBlock.id)) {
           // Update existing block and cache its ID
+          matchedBlockIds.add(existingBlock.id);
           blockCacheStore.setBlockId(pageId, i, existingBlock.id);
           
           if (existingBlock.text !== item.content) {
@@ -567,8 +575,8 @@ export class NodeService {
             });
             console.log('📝 Queueing update for block:', existingBlock.id, 'old:', existingBlock.text, 'new:', item.content);
           }
-        } else if (item.content && item.content.trim()) {
-          // Only create new block if there's actual content
+        } else {
+          // Create block even if empty (for spacing between lists)
             // Delete existing block if it's not a paragraph
             if (existingBlock) {
               console.log('🔄 Replacing non-paragraph block at order', i);
@@ -595,7 +603,7 @@ export class NodeService {
               });
               processedOrders.add(existingParagraphWithSameContent.order);
             } else {
-              // Create new block only if content is not empty
+              // Create new block (including empty ones for spacing)
               const blockId = generateBlockId();
               
               // Cache the block ID immediately
@@ -607,7 +615,7 @@ export class NodeService {
                 workspaceId,
                 node: {
                   type: 'paragraph',
-                  text: item.content,
+                  text: item.content || '',
                   parentId: pageId,
                   order: i,
                   refs: [],
@@ -615,7 +623,7 @@ export class NodeService {
                   _v: 1
                 }
               });
-              console.log('➕ Creating NEW paragraph block:', blockId, 'with text:', item.content, 'and caching it');
+              console.log('➕ Creating NEW paragraph block:', blockId, 'with text:', item.content || '(empty)', 'and caching it');
             }
           }
       } else if (item.type === 'bullet_list' && item.items) {
@@ -627,25 +635,31 @@ export class NodeService {
         console.log('🔫 Joined bullet list text:', bulletListText);
         processedOrders.add(i);
         
-        // Find existing bullet block at this position with the same content
+        // Try to find an existing bullet block at this exact position that hasn't been matched yet
         const existingBlock = Array.from(existingBlockMap.values()).find(
-          b => Math.abs(b.order - i) < 0.001 && b.type === 'bullet'
+          b => Math.abs(b.order - i) < 0.001 && 
+               b.type === 'bullet' && 
+               !matchedBlockIds.has(b.id)
         );
         
-        if (existingBlock) {
-          // Cache the existing block ID
+        // Check if this exact bullet list content already exists at this position
+        if (existingBlock && existingBlock.text === bulletListText) {
+          // Mark this block as matched
+          matchedBlockIds.add(existingBlock.id);
+          blockCacheStore.setBlockId(pageId, i, existingBlock.id);
+          console.log('✅ Bullet list unchanged at position', i, 'block:', existingBlock.id);
+        } else if (existingBlock && existingBlock.text !== bulletListText) {
+          // Update existing bullet block with new content
+          matchedBlockIds.add(existingBlock.id);
           blockCacheStore.setBlockId(pageId, i, existingBlock.id);
           
-          // Only update if the text is different
-          if (existingBlock.text !== bulletListText) {
-            operations.push({
-              kind: 'update',
-              nodeId: existingBlock.id,
-              workspaceId,
-              delta: { text: bulletListText }
-            });
-            console.log('📝 Queueing update for bullet list block:', existingBlock.id, 'old text:', existingBlock.text, 'new text:', bulletListText);
-          }
+          operations.push({
+            kind: 'update',
+            nodeId: existingBlock.id,
+            workspaceId,
+            delta: { text: bulletListText }
+          });
+          console.log('📝 Updating bullet list block:', existingBlock.id, 'at position', i, 'old:', existingBlock.text, 'new:', bulletListText);
         } else {
           // Check if there's a non-bullet block at this position that needs to be deleted
           const existingNonBulletBlock = Array.from(existingBlockMap.values()).find(
@@ -664,6 +678,9 @@ export class NodeService {
           // Create new bullet list block
           const bulletListId = generateBlockId();
           
+          // Cache the block ID immediately
+          blockCacheStore.setBlockId(pageId, i, bulletListId);
+          
           operations.push({
             kind: 'create',
             nodeId: bulletListId,
@@ -678,7 +695,7 @@ export class NodeService {
               _v: 1
             }
           });
-          console.log('➕ Creating NEW bullet list block:', bulletListId, 'with text:', bulletListText);
+          console.log('➕ Creating NEW bullet list block:', bulletListId, 'with text:', bulletListText, 'and caching it');
         }
       }
     }

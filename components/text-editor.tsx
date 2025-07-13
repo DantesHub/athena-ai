@@ -146,6 +146,7 @@ export function TextEditor({
     if (containerRef.current && !editorRef.current && !isInitializedRef.current) {
       console.log('🚀 TextEditor: Creating new editor instance');
       console.log('🚀 TextEditor: isInitialized:', isInitializedRef.current, 'editorRef:', !!editorRef.current);
+      console.log('🚀 TextEditor: Container element:', containerRef.current);
       
       // Determine initial content
       const localContent = nodeId ? getLocalContent(nodeId) : undefined;
@@ -233,8 +234,13 @@ export function TextEditor({
         console.log('🆕 TextEditor: Using initial content');
       }
         
+      console.log('📄 TextEditor: Creating editor state with content:', content);
+      const doc = buildDocumentFromContent(content);
+      console.log('📄 TextEditor: Built document:', doc);
+      console.log('📄 TextEditor: Document has', doc.childCount, 'children');
+      
       const state = EditorState.create({
-        doc: buildDocumentFromContent(content),
+        doc: doc,
         plugins: [
           history(),
           keymap({
@@ -271,6 +277,9 @@ export function TextEditor({
 
       console.log('🎨 TextEditor: Creating EditorView with plugins');
       console.log('📄 TextEditor: Initial doc content:', content);
+      console.log('📄 TextEditor: Editor state doc:', state.doc);
+      console.log('📄 TextEditor: Editor state doc JSON:', state.doc.toJSON());
+      console.log('📄 TextEditor: Container element exists:', !!containerRef.current);
       
       editorRef.current = new EditorView(containerRef.current, {
         state,
@@ -332,6 +341,9 @@ export function TextEditor({
       });
       
       isInitializedRef.current = true;
+      console.log('✅ TextEditor: Editor initialized successfully');
+      console.log('✅ TextEditor: Editor view exists:', !!editorRef.current);
+      console.log('✅ TextEditor: Editor state:', editorRef.current?.state);
     }
 
     return () => {

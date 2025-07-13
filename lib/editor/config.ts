@@ -458,8 +458,9 @@ export function buildContentFromDocument(doc: ProseMirrorNode): string {
   console.log('🔍 buildContentFromDocument: Processing doc with', doc.content.size, 'nodes');
   console.log('📄 buildContentFromDocument: Full doc structure:', doc.toJSON());
   
-  doc.content.forEach((node, offset, index) => {
-    console.log('📝 buildContentFromDocument: Node', index, 'type:', node.type.name, 'content:', node.textContent);
+  // Helper function to process nodes and handle nested lists
+  const processNode = (node: ProseMirrorNode) => {
+    console.log('📝 Processing node:', node.type.name, 'content:', node.textContent);
     
     if (node.type.name === 'paragraph') {
       // Don't skip empty paragraphs - they represent line breaks
@@ -475,29 +476,60 @@ export function buildContentFromDocument(doc: ProseMirrorNode): string {
       });
     } else if (node.type.name === 'bullet_list') {
       const items: string[] = [];
+      const nestedLists: ProseMirrorNode[] = [];
+      
       node.content.forEach((listItem) => {
-        console.log('🔫 Bullet list item:', listItem.type.name, 'text:', listItem.textContent);
-        items.push(listItem.textContent);
+        console.log('🔫 Bullet list item:', listItem.type.name, 'content size:', listItem.content.size);
+        
+        // Process the list item's children
+        listItem.content.forEach((child, offset, index) => {
+          if (index === 0 && child.type.name === 'paragraph') {
+            // Add the first paragraph as the list item text
+            items.push(child.textContent);
+            console.log('🔫 Added list item:', child.textContent);
+          } else if (child.type.name === 'bullet_list' || child.type.name === 'ordered_list') {
+            // Store nested lists to process after the parent list
+            console.log('🔫 Found nested list, storing for later processing');
+            nestedLists.push(child);
+          }
+        });
       });
+      
+      // Push the parent list first
       console.log('🔫 Bullet list items:', items);
-      console.log('🔫 Full bullet list content being pushed:', {
-        type: 'bullet_list',
-        items,
-        itemCount: items.length
-      });
       content.push({
         type: 'bullet_list',
         items
       });
+      
+      // Then process any nested lists
+      nestedLists.forEach(nestedList => {
+        processNode(nestedList);
+      });
     } else if (node.type.name === 'ordered_list') {
       const items: string[] = [];
+      const nestedLists: ProseMirrorNode[] = [];
+      
       node.content.forEach((listItem) => {
-        items.push(listItem.textContent);
+        // Process the list item's children
+        listItem.content.forEach((child, offset, index) => {
+          if (index === 0 && child.type.name === 'paragraph') {
+            items.push(child.textContent);
+          } else if (child.type.name === 'bullet_list' || child.type.name === 'ordered_list') {
+            nestedLists.push(child);
+          }
+        });
       });
+      
       content.push({
         type: 'ordered_list',
         order: node.attrs.order,
         items
+      });
+      
+      // Process any nested lists
+      nestedLists.forEach(nestedList => {
+        processNode(nestedList);
       });
     } else if (node.type.name === 'code_block') {
       content.push({
@@ -516,32 +548,58 @@ export function buildContentFromDocument(doc: ProseMirrorNode): string {
         originalText: node.attrs.originalText
       });
     }
+  };
+  
+  // Process all top-level nodes
+  doc.content.forEach((node) => {
+    processNode(node);
   });
   
   return JSON.stringify(content);
 }
 
 export function buildDocumentFromContent(content: string): ProseMirrorNode {
+  console.log('🏗️ buildDocumentFromContent called with:', content);
   try {
     const parsed = JSON.parse(content);
+    console.log('🏗️ Parsed content:', parsed);
     const nodes: ProseMirrorNode[] = [];
     
     parsed.forEach((item: any) => {
       if (item.type === 'paragraph') {
-        nodes.push(documentSchema.nodes.paragraph.create(null, documentSchema.text(item.content || '')));
+        // Handle empty content by creating paragraph without text node if content is empty
+        const content = item.content || '';
+        if (content) {
+          nodes.push(documentSchema.nodes.paragraph.create(null, documentSchema.text(content)));
+        } else {
+          nodes.push(documentSchema.nodes.paragraph.create());
+        }
       } else if (item.type === 'heading') {
-        nodes.push(documentSchema.nodes.heading.create(
-          { level: item.level || 1 },
-          documentSchema.text(item.content || '')
-        ));
+        const content = item.content || '';
+        if (content) {
+          nodes.push(documentSchema.nodes.heading.create(
+            { level: item.level || 1 },
+            documentSchema.text(content)
+          ));
+        } else {
+          nodes.push(documentSchema.nodes.heading.create({ level: item.level || 1 }));
+        }
       } else if (item.type === 'bullet_list') {
         const listItems: ProseMirrorNode[] = [];
         if (item.items && Array.isArray(item.items)) {
           item.items.forEach((itemText: string) => {
-            listItems.push(documentSchema.nodes.list_item.create(
-              null,
-              documentSchema.nodes.paragraph.create(null, documentSchema.text(itemText || ''))
-            ));
+            // Create paragraph with text only if there's content
+            if (itemText) {
+              listItems.push(documentSchema.nodes.list_item.create(
+                null,
+                documentSchema.nodes.paragraph.create(null, documentSchema.text(itemText))
+              ));
+            } else {
+              listItems.push(documentSchema.nodes.list_item.create(
+                null,
+                documentSchema.nodes.paragraph.create()
+              ));
+            }
           });
         }
         if (listItems.length > 0) {
@@ -551,10 +609,17 @@ export function buildDocumentFromContent(content: string): ProseMirrorNode {
         const listItems: ProseMirrorNode[] = [];
         if (item.items && Array.isArray(item.items)) {
           item.items.forEach((itemText: string) => {
-            listItems.push(documentSchema.nodes.list_item.create(
-              null,
-              documentSchema.nodes.paragraph.create(null, documentSchema.text(itemText || ''))
-            ));
+            if (itemText) {
+              listItems.push(documentSchema.nodes.list_item.create(
+                null,
+                documentSchema.nodes.paragraph.create(null, documentSchema.text(itemText))
+              ));
+            } else {
+              listItems.push(documentSchema.nodes.list_item.create(
+                null,
+                documentSchema.nodes.paragraph.create()
+              ));
+            }
           });
         }
         if (listItems.length > 0) {
@@ -564,17 +629,37 @@ export function buildDocumentFromContent(content: string): ProseMirrorNode {
           ));
         }
       } else if (item.type === 'code_block') {
-        nodes.push(documentSchema.nodes.code_block.create(null, documentSchema.text(item.content || '')));
+        const content = item.content || '';
+        if (content) {
+          nodes.push(documentSchema.nodes.code_block.create(null, documentSchema.text(content)));
+        } else {
+          nodes.push(documentSchema.nodes.code_block.create());
+        }
       } else if (item.type === 'blockquote') {
-        nodes.push(documentSchema.nodes.blockquote.create(
-          null,
-          documentSchema.nodes.paragraph.create(null, documentSchema.text(item.content || ''))
-        ));
+        const content = item.content || '';
+        if (content) {
+          nodes.push(documentSchema.nodes.blockquote.create(
+            null,
+            documentSchema.nodes.paragraph.create(null, documentSchema.text(content))
+          ));
+        } else {
+          nodes.push(documentSchema.nodes.blockquote.create(
+            null,
+            documentSchema.nodes.paragraph.create()
+          ));
+        }
       } else if (item.type === 'ai_suggestion') {
-        nodes.push(documentSchema.nodes.ai_suggestion.create(
-          { originalText: item.originalText || '' },
-          documentSchema.text(item.content || '')
-        ));
+        const content = item.content || '';
+        if (content) {
+          nodes.push(documentSchema.nodes.ai_suggestion.create(
+            { originalText: item.originalText || '' },
+            documentSchema.text(content)
+          ));
+        } else {
+          nodes.push(documentSchema.nodes.ai_suggestion.create(
+            { originalText: item.originalText || '' }
+          ));
+        }
       }
     });
     
@@ -582,8 +667,12 @@ export function buildDocumentFromContent(content: string): ProseMirrorNode {
       nodes.push(documentSchema.nodes.paragraph.create());
     }
     
-    return documentSchema.nodes.doc.create(null, nodes);
-  } catch {
+    console.log('🏗️ Created nodes:', nodes.length, 'nodes');
+    const doc = documentSchema.nodes.doc.create(null, nodes);
+    console.log('🏗️ Final document:', doc.toJSON());
+    return doc;
+  } catch (error) {
+    console.error('❌ Error building document from content:', error);
     return documentSchema.nodes.doc.create(null, documentSchema.nodes.paragraph.create());
   }
 }
