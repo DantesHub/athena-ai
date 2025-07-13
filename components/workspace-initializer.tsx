@@ -1,12 +1,16 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { useWorkspaceStore } from '@/lib/store/workspace.store';
 import { WorkspaceService } from '@/lib/firebase/services/workspace.service';
+import { NodeService } from '@/lib/firebase/services/node.service';
+import { getTodayDate } from '@/lib/utils/date';
 
 export function WorkspaceInitializer({ children }: { children: React.ReactNode }) {
   const [isInitialized, setIsInitialized] = useState(false);
   const { currentWorkspace, workspaces, loadWorkspaces, createWorkspace } = useWorkspaceStore();
+  const router = useRouter();
   
   useEffect(() => {
     const initWorkspace = async () => {
@@ -15,6 +19,10 @@ export function WorkspaceInitializer({ children }: { children: React.ReactNode }
       const defaultWorkspaceId = 'default-workspace';
       
       try {
+        // Test Firestore connection first
+        console.log('🔗 Testing Firestore connection...');
+  
+        
         // Check if default workspace exists
         console.log('🔍 WorkspaceInitializer: Checking for existing workspace...');
         let workspace = await WorkspaceService.getWorkspace(defaultWorkspaceId);
@@ -36,6 +44,29 @@ export function WorkspaceInitializer({ children }: { children: React.ReactNode }
             currentWorkspace: workspace,
             workspaces: [workspace]
           });
+          
+          // Clean up any daily notes that have content field
+          try {
+            await NodeService.cleanupDailyNotesContent(workspace.id);
+          } catch (error) {
+            console.error('⚠️ Failed to cleanup daily notes, continuing...', error);
+          }
+          
+          // Navigate to today's daily note
+          try {
+            console.log('📅 WorkspaceInitializer: Navigating to daily note...');
+            const todayDate = getTodayDate();
+            const dailyNote = await NodeService.getOrCreateDailyNote(
+              workspace.id,
+              todayDate,
+              'default-user'
+            );
+            
+            console.log('🚀 WorkspaceInitializer: Redirecting to daily note:', dailyNote.id);
+            router.push(`/workspace/${workspace.id}/node/${dailyNote.id}`);
+          } catch (error) {
+            console.error('❌ WorkspaceInitializer: Failed to navigate to daily note:', error);
+          }
         }
         
         setIsInitialized(true);

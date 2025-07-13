@@ -31,7 +31,8 @@ export function useEditorPersistence({
   } = useWorkspaceStore();
   
   const saveTimeoutRef = useRef<NodeJS.Timeout>();
-  const [blocks, setBlocks] = useState<Node[]>([]);
+  const [blocks, setBlocks] = useState<Node[] | undefined>(undefined);
+  const [blocksLoaded, setBlocksLoaded] = useState(false);
   const prevNodeIdRef = useRef(nodeId);
   
   // Track if blocks have been initially loaded
@@ -51,10 +52,14 @@ export function useEditorPersistence({
       if (!blocksLoadedRef.current) {
         NodeService.getBlocks(workspaceId, nodeId).then(loadedBlocks => {
           console.log('📋 Persistence: Loaded', loadedBlocks.length, 'blocks for node', nodeId);
+          console.log('📋 Persistence: Block data:', loadedBlocks.map(b => ({ id: b.id, text: b.text, order: b.order })));
           setBlocks(loadedBlocks);
+          setBlocksLoaded(true);
           blocksLoadedRef.current = true;
         }).catch(error => {
           console.error('❌ Persistence: Failed to load blocks:', error);
+          setBlocks([]);
+          setBlocksLoaded(true);
         });
       }
     }
@@ -137,13 +142,16 @@ export function useEditorPersistence({
           // Get current node from store to check its type
           const currentNode = nodes.get(nodeId);
           
+          // Check if this is a daily note by looking at the nodeId pattern
+          const isDailyNote = nodeId.startsWith('daily-');
+          
           // For daily notes and pages, sync blocks instead of storing content
-          if (currentNode?.type === 'daily' || currentNode?.type === 'page') {
-            console.log('📋 Persistence: Syncing blocks for', currentNode.type, nodeId);
+          if (isDailyNote || currentNode?.type === 'daily' || currentNode?.type === 'page') {
+            console.log('📋 Persistence: Syncing blocks for', currentNode?.type || 'daily note', nodeId);
             await NodeService.syncPageBlocks(workspaceId, nodeId, parsedContent, userId);
             
             // Update page metadata (title, etc) if needed
-            if (title !== undefined && title !== currentNode.title) {
+            if (title !== undefined && currentNode && title !== currentNode.title) {
               await updateNode(workspaceId, nodeId, { title });
             }
           } else {
@@ -205,10 +213,12 @@ export function useEditorPersistence({
   return {
     currentNode,
     blocks,
+    blocksLoaded,
     saveContentLocally,
     saveContentToFirebase,
     getLocalContent,
     isWorkspaceReady: !!workspaceId,
     isSaving,
+    isLoadingBlocks: !blocksLoaded,
   };
 }

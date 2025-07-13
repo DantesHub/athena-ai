@@ -8,6 +8,7 @@ import {
   liftListItem, 
   sinkListItem 
 } from 'prosemirror-schema-list';
+import { chainCommands, newlineInCode, createParagraphNear, liftEmptyBlock, splitBlock } from 'prosemirror-commands';
 
 export const documentSchema = new Schema({
   nodes: {
@@ -302,11 +303,29 @@ function handleEscape(state: any, dispatch: any): boolean {
 
 export function buildListKeymap(): Plugin {
   return keymap({
-    'Enter': splitListItem(documentSchema.nodes.list_item),
     'Shift-Tab': liftListItem(documentSchema.nodes.list_item),
     'Tab': sinkListItem(documentSchema.nodes.list_item),
     'Space': handleSpace,
     'Escape': handleEscape,
+  });
+}
+
+export function buildSaveKeymap(onSave?: () => void): Plugin {
+  return keymap({
+    'Ctrl-Enter': (state, dispatch) => {
+      console.log('🔑 Save keymap: Ctrl+Enter pressed');
+      if (onSave) {
+        onSave();
+      }
+      return true;
+    },
+    'Cmd-Enter': (state, dispatch) => {
+      console.log('🔑 Save keymap: Cmd+Enter pressed');
+      if (onSave) {
+        onSave();
+      }
+      return true;
+    },
   });
 }
 
@@ -414,7 +433,7 @@ export function buildAISuggestionPlugin(onOpenChat?: (message: string) => void):
 interface HandleTransactionProps {
   transaction: Transaction;
   editorRef: React.MutableRefObject<EditorView | null>;
-  onSaveContent: (content: string, debounce: boolean) => void;
+  onSaveContent: (content: string) => void;
 }
 
 export function handleTransaction({
@@ -429,30 +448,38 @@ export function handleTransaction({
 
   if (transaction.docChanged && !transaction.getMeta('no-save')) {
     const content = buildContentFromDocument(newState.doc);
-    onSaveContent(content, true);
+    onSaveContent(content);
   }
 }
 
 export function buildContentFromDocument(doc: ProseMirrorNode): string {
   const content: any[] = [];
   
-  doc.content.forEach((node) => {
+  console.log('🔍 buildContentFromDocument: Processing doc with', doc.content.size, 'nodes');
+  console.log('📄 buildContentFromDocument: Full doc structure:', doc.toJSON());
+  
+  doc.content.forEach((node, offset, index) => {
+    console.log('📝 buildContentFromDocument: Node', index, 'type:', node.type.name, 'content:', node.textContent);
+    
     if (node.type.name === 'paragraph') {
+      // Don't skip empty paragraphs - they represent line breaks
       content.push({
         type: 'paragraph',
-        content: node.textContent
+        content: node.textContent || ''
       });
     } else if (node.type.name === 'heading') {
       content.push({
         type: 'heading',
         level: node.attrs.level,
-        content: node.textContent
+        content: node.textContent || ''
       });
     } else if (node.type.name === 'bullet_list') {
       const items: string[] = [];
       node.content.forEach((listItem) => {
+        console.log('🔫 Bullet list item:', listItem.type.name, 'text:', listItem.textContent);
         items.push(listItem.textContent);
       });
+      console.log('🔫 Bullet list items:', items);
       content.push({
         type: 'bullet_list',
         items

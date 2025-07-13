@@ -6,7 +6,8 @@
     "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "deploy:rules": "firebase deploy --only firestore:rules --project athena-558f8"
   },
   "dependencies": {
     "classnames": "^2.5.1",
@@ -48,6 +49,7 @@
     "@types/prosemirror-view": "^1.23.3",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "firebase-tools": "^14.10.1",
     "tailwindcss": "^4",
     "typescript": "^5"
   }

@@ -14,9 +14,13 @@ interface WorkspaceState {
   nodes: Map<string, Node>;
   childNodes: Map<string, Node[]>; // parentId -> children
   
+  // Local content (not persisted to Firebase immediately)
+  localContent: Map<string, string>; // nodeId -> content
+  
   // UI state
   isLoading: boolean;
   error: string | null;
+  isSaving: boolean;
   
   // Actions
   setCurrentWorkspace: (workspace: Workspace | null) => void;
@@ -29,6 +33,11 @@ interface WorkspaceState {
   updateNode: (workspaceId: string, nodeId: string, updates: Partial<Node>) => Promise<void>;
   deleteNode: (workspaceId: string, nodeId: string) => Promise<void>;
   clearCache: () => void;
+  
+  // Local content management
+  setLocalContent: (nodeId: string, content: string) => void;
+  getLocalContent: (nodeId: string) => string | undefined;
+  clearLocalContent: (nodeId: string) => void;
 }
 
 export const useWorkspaceStore = create<WorkspaceState>()(
@@ -40,8 +49,10 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         workspaces: [],
         nodes: new Map(),
         childNodes: new Map(),
+        localContent: new Map(),
         isLoading: false,
         error: null,
+        isSaving: false,
         
         // Actions
         setCurrentWorkspace: (workspace) => set({ currentWorkspace: workspace }),
@@ -178,7 +189,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             updateFields: Object.keys(updates)
           });
           
-          set({ isLoading: true, error: null });
+          set({ isSaving: true, error: null });
           try {
             await NodeService.updateNode(workspaceId, nodeId, updates);
             console.log('✅ Store: Node updated successfully');
@@ -191,12 +202,14 @@ export const useWorkspaceStore = create<WorkspaceState>()(
               set(state => {
                 const newNodes = new Map(state.nodes);
                 newNodes.set(nodeId, updatedNode);
-                return { nodes: newNodes, isLoading: false };
+                return { nodes: newNodes, isSaving: false };
               });
+            } else {
+              set({ isSaving: false });
             }
           } catch (error) {
             console.error('❌ Store: Failed to update node:', error);
-            set({ error: (error as Error).message, isLoading: false });
+            set({ error: (error as Error).message, isSaving: false });
             throw error;
           }
         },
@@ -234,7 +247,31 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         clearCache: () => set({
           nodes: new Map(),
           childNodes: new Map(),
+          localContent: new Map(),
         }),
+        
+        // Local content management
+        setLocalContent: (nodeId, content) => {
+          console.log('💾 Store: Saving local content for node', nodeId);
+          set(state => {
+            const newLocalContent = new Map(state.localContent);
+            newLocalContent.set(nodeId, content);
+            return { localContent: newLocalContent };
+          });
+        },
+        
+        getLocalContent: (nodeId) => {
+          const { localContent } = get();
+          return localContent.get(nodeId);
+        },
+        
+        clearLocalContent: (nodeId) => {
+          set(state => {
+            const newLocalContent = new Map(state.localContent);
+            newLocalContent.delete(nodeId);
+            return { localContent: newLocalContent };
+          });
+        },
       })
   )
 );

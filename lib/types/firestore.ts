@@ -16,18 +16,26 @@ export interface WorkspaceMember {
 }
 
 // Node types
-export type NodeType = 'text' | 'heading' | 'tag' | 'page' | 'image' | 'bullet_list' | 'ordered_list' | 'list_item';
+export type NodeType = 'text' | 'heading' | 'tag' | 'page' | 'image' | 'bullet_list' | 'ordered_list' | 'list_item' | 'daily' | 'paragraph' | 'list' | 'listItem';
 
 export interface Node {
   id: string;
   type: NodeType;
   parentId: string | null;
   order: number;
-  content: any; // ProseMirror/Tiptap JSON content
+  content?: any; // ProseMirror/Tiptap JSON content (only for page-level nodes)
+  text?: string; // Text content for block nodes
   refs: string[]; // outgoing links (denormalized)
   createdBy: string;
   createdAt: Timestamp;
   updatedAt: Timestamp;
+  // For daily notes
+  date?: string; // Format: YYYY-MM-DD
+  title?: string;
+  // For list nodes
+  listStyle?: 'bullet' | 'number';
+  // Schema version
+  _v?: number;
 }
 
 // Edge types
