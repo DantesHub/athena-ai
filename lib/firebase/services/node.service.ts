@@ -393,6 +393,23 @@ export class NodeService {
     }
   }
   
+  static async deleteBlock(
+    workspaceId: string,
+    blockId: string
+  ): Promise<void> {
+    console.log('🗑️ Deleting block:', blockId);
+    
+    const blockRef = doc(db, 'workspaces', workspaceId, 'nodes', blockId);
+    
+    try {
+      await deleteDoc(blockRef);
+      console.log('✅ Block deleted successfully');
+    } catch (error: any) {
+      console.error('❌ Failed to delete block:', error);
+      throw error;
+    }
+  }
+  
   static async getBlocks(
     workspaceId: string,
     parentId: string
@@ -436,6 +453,24 @@ export class NodeService {
     console.log('🔄 Syncing blocks for page:', pageId);
     console.log('📋 Content to sync:', JSON.stringify(content, null, 2));
     
+    // Special handling for empty content (user deleted everything)
+    if (content.length === 0 || (content.length === 1 && content[0].type === 'paragraph' && !content[0].content)) {
+      console.log('🗑️ Content is empty or has single empty paragraph - deleting all blocks');
+      
+      const existingBlocks = await this.getBlocks(workspaceId, pageId);
+      if (existingBlocks.length > 0) {
+        const batch = writeBatch(db);
+        for (const block of existingBlocks) {
+          const blockRef = doc(db, 'workspaces', workspaceId, 'nodes', block.id);
+          batch.delete(blockRef);
+          console.log('🗑️ Deleting block:', block.id, 'type:', block.type);
+        }
+        await batch.commit();
+        console.log('✅ All blocks deleted');
+      }
+      return;
+    }
+    
     // First, ensure the parent node doesn't have a content field
     // This is important for daily notes that might have been incorrectly saved with content
     const nodeRef = doc(db, 'workspaces', workspaceId, 'nodes', pageId);
@@ -450,6 +485,13 @@ export class NodeService {
     
     // Get existing blocks
     const existingBlocks = await this.getBlocks(workspaceId, pageId);
+    console.log('📊 Existing blocks before sync:', existingBlocks.map(b => ({
+      id: b.id,
+      type: b.type,
+      order: b.order,
+      text: b.text?.substring(0, 30)
+    })));
+    
     const existingBlockMap = new Map(existingBlocks.map(b => [b.order, b]));
     
     // Process content array
@@ -464,7 +506,7 @@ export class NodeService {
       if (item.type === 'paragraph' && item.content !== undefined) {
         const existingBlock = existingBlockMap.get(i);
         
-        if (existingBlock) {
+        if (existingBlock && existingBlock.type === 'paragraph') {
           // Update existing block if text changed
           if (existingBlock.text !== item.content) {
             const blockRef = doc(db, 'workspaces', workspaceId, 'nodes', existingBlock.id);
@@ -475,6 +517,12 @@ export class NodeService {
             console.log('📝 Updating block:', existingBlock.id);
           }
         } else {
+          // Delete existing block if it's not a paragraph
+          if (existingBlock) {
+            const blockRef = doc(db, 'workspaces', workspaceId, 'nodes', existingBlock.id);
+            batch.delete(blockRef);
+          }
+          
           // Create new block
           const blockId = generateBlockId();
           const blockRef = doc(db, 'workspaces', workspaceId, 'nodes', blockId);
@@ -494,82 +542,67 @@ export class NodeService {
       } else if (item.type === 'bullet_list' && item.items) {
         console.log('🔫 Processing bullet list with', item.items.length, 'items');
         
-        // First, check if there's already a list wrapper at this position
-        const existingListWrapper = existingBlockMap.get(i);
-        let listId: string;
+        // For bullet lists, we create individual bullet blocks
+        // Each bullet block will have the same order but different sub-orders
+        let lastBulletBlockId: string | null = null;
         
-        if (existingListWrapper && existingListWrapper.type === 'list') {
-          // Use existing list wrapper
-          listId = existingListWrapper.id;
-          console.log('📋 Using existing list wrapper:', listId);
-        } else {
-          // Create list wrapper node
-          listId = `lst_${generateBlockId()}`;
-          const listRef = doc(db, 'workspaces', workspaceId, 'nodes', listId);
-          batch.set(listRef, {
-            type: 'list',
-            listStyle: 'bullet',
-            parentId: pageId,
-            order: i,
-            refs: [],
-            createdBy: userId,
-            _v: 1,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp()
-          });
-          console.log('➕ Creating list wrapper:', listId);
-        }
-        
-        // Get existing list items for this list
-        const existingListItems = await this.getBlocks(workspaceId, listId);
-        const existingListItemMap = new Map(existingListItems.map(b => [b.order, b]));
-        
-        // Create/update list items
         for (let j = 0; j < item.items.length; j++) {
-          const listItemText = item.items[j];
-          const existingItem = existingListItemMap.get(j);
+          const bulletText = item.items[j];
+          const bulletOrder = i + (j * 0.001); // Use fractional orders
+          processedOrders.add(bulletOrder);
           
-          if (existingItem) {
-            // Update existing list item if text changed
-            if (existingItem.text !== listItemText) {
-              const itemRef = doc(db, 'workspaces', workspaceId, 'nodes', existingItem.id);
-              batch.update(itemRef, {
-                text: listItemText,
+          // Find existing bullet at this position
+          const existingBullet = Array.from(existingBlockMap.values()).find(
+            b => Math.abs(b.order - bulletOrder) < 0.0001
+          );
+          
+          if (existingBullet && existingBullet.type === 'bullet') {
+            // Update existing bullet if text changed
+            if (existingBullet.text !== bulletText) {
+              const blockRef = doc(db, 'workspaces', workspaceId, 'nodes', existingBullet.id);
+              batch.update(blockRef, {
+                text: bulletText,
                 updatedAt: serverTimestamp()
               });
-              console.log('📝 Updating list item:', existingItem.id);
+              console.log('📝 Updating bullet block:', existingBullet.id);
             }
+            lastBulletBlockId = existingBullet.id;
           } else {
-            // Create new list item
-            const itemId = `li_${generateBlockId()}`;
-            const itemRef = doc(db, 'workspaces', workspaceId, 'nodes', itemId);
-            batch.set(itemRef, {
-              type: 'listItem',
-              text: listItemText,
-              parentId: listId,
-              order: j,
+            // Delete existing block if it's not a bullet
+            if (existingBullet) {
+              const blockRef = doc(db, 'workspaces', workspaceId, 'nodes', existingBullet.id);
+              batch.delete(blockRef);
+            }
+            
+            // Create new bullet block
+            const bulletId = generateBlockId(); // This already generates blk_ prefix
+            const blockRef = doc(db, 'workspaces', workspaceId, 'nodes', bulletId);
+            
+            // First bullet references the page, subsequent bullets reference the previous bullet
+            const bulletParentId = j === 0 ? pageId : lastBulletBlockId || pageId;
+            
+            batch.set(blockRef, {
+              type: 'bullet',
+              text: bulletText,
+              parentId: bulletParentId,
+              order: bulletOrder,
               refs: [],
               createdBy: userId,
               _v: 1,
               createdAt: serverTimestamp(),
               updatedAt: serverTimestamp()
             });
-            console.log('➕ Creating list item:', itemId, 'with text:', listItemText);
-          }
-        }
-        
-        // Delete list items that no longer exist
-        for (const [order, item] of existingListItemMap) {
-          if (order >= item.items.length) {
-            const itemRef = doc(db, 'workspaces', workspaceId, 'nodes', item.id);
-            batch.delete(itemRef);
-            console.log('🗑️ Deleting excess list item:', item.id);
+            console.log('➕ Creating bullet block:', bulletId, 'with parent:', bulletParentId);
+            lastBulletBlockId = bulletId;
           }
         }
       }
     }
     
     // Delete blocks that no longer exist
+    console.log('🔍 Checking for blocks to delete. Processed orders:', Array.from(processedOrders));
+    console.log('🔍 Existing block orders:', Array.from(existingBlockMap.keys()));
+    
     for (const [order, block] of existingBlockMap) {
       // Check if this block's order is in processedOrders (including fractional orders)
       let isProcessed = false;
@@ -583,7 +616,7 @@ export class NodeService {
       if (!isProcessed) {
         const blockRef = doc(db, 'workspaces', workspaceId, 'nodes', block.id);
         batch.delete(blockRef);
-        console.log('🗑️ Deleting block:', block.id);
+        console.log('🗑️ Deleting block:', block.id, 'type:', block.type, 'order:', order, 'text:', block.text?.substring(0, 30));
       }
     }
     

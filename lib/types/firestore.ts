@@ -16,7 +16,7 @@ export interface WorkspaceMember {
 }
 
 // Node types
-export type NodeType = 'text' | 'heading' | 'tag' | 'page' | 'image' | 'bullet_list' | 'ordered_list' | 'list_item' | 'daily' | 'paragraph' | 'list' | 'listItem';
+export type NodeType = 'text' | 'heading' | 'tag' | 'page' | 'image' | 'daily' | 'paragraph' | 'bullet' | 'number';
 
 export interface Node {
   id: string;
@@ -32,8 +32,6 @@ export interface Node {
   // For daily notes
   date?: string; // Format: YYYY-MM-DD
   title?: string;
-  // For list nodes
-  listStyle?: 'bullet' | 'number';
   // Schema version
   _v?: number;
 }

@@ -49,6 +49,7 @@ export function TextEditor({
   const isInitializedRef = useRef(false);
   const prevNodeIdRef = useRef(nodeId);
   const prevBlocksLengthRef = useRef(0);
+  const deleteTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
   const { currentNode, blocks, blocksLoaded, saveContentLocally, saveContentToFirebase, isWorkspaceReady, isSaving, getLocalContent, isLoadingBlocks } = useEditorPersistence({
     workspaceId,
@@ -149,46 +150,42 @@ export function TextEditor({
         const blockContent: any[] = [];
         let currentListItems: string[] = [];
         
-        // Process blocks - need to handle list wrapper nodes
+        // Process blocks - group consecutive bullet blocks into lists
+        let currentBulletList: string[] = [];
+        let bulletListStartIndex = -1;
+        
         for (let i = 0; i < sortedBlocks.length; i++) {
           const block = sortedBlocks[i];
+          const nextBlock = sortedBlocks[i + 1];
           
           console.log(`📝 TextEditor: Processing block ${i}:`, { 
             type: block.type, 
             text: block.text?.substring(0, 30), 
             hasText: !!block.text,
-            listStyle: block.listStyle
+            order: block.order
           });
           
-          if (block.type === 'list') {
-            // This is a list wrapper node - need to load its children
-            console.log('📋 TextEditor: Found list wrapper:', block.id, 'style:', block.listStyle);
-            
-            // Get list items for this list - this is synchronous in the current flow
-            // In a real implementation, we'd need to handle this asynchronously
-            const listItems: string[] = [];
-            
-            // For now, we'll look ahead in sortedBlocks for listItem nodes that might belong to this list
-            // This is a temporary solution - ideally we'd load list items separately
-            const potentialListItems = sortedBlocks.filter(b => 
-              b.type === 'listItem' && b.parentId === block.id
-            ).sort((a, b) => a.order - b.order);
-            
-            console.log('📋 TextEditor: Found', potentialListItems.length, 'list items for list', block.id);
-            
-            for (const listItem of potentialListItems) {
-              listItems.push(listItem.text || '');
+          if (block.type === 'bullet') {
+            // Start or continue a bullet list
+            if (currentBulletList.length === 0) {
+              bulletListStartIndex = Math.floor(block.order);
             }
+            currentBulletList.push(block.text || '');
             
-            if (listItems.length > 0) {
+            // Check if this is the last bullet in a sequence
+            const isLastBullet = !nextBlock || 
+              nextBlock.type !== 'bullet' || 
+              Math.floor(nextBlock.order) !== bulletListStartIndex;
+            
+            if (isLastBullet && currentBulletList.length > 0) {
+              // End of bullet list, push it
               blockContent.push({
-                type: block.listStyle === 'bullet' ? 'bullet_list' : 'ordered_list',
-                items: listItems
+                type: 'bullet_list',
+                items: [...currentBulletList]
               });
+              currentBulletList = [];
+              bulletListStartIndex = -1;
             }
-          } else if (block.type === 'listItem') {
-            // Skip listItem nodes as they're handled by their parent list
-            console.log('⏭️ TextEditor: Skipping listItem (should be handled by parent list)');
           } else if (block.type === 'paragraph' || block.type === 'text') {
             // Handle paragraph blocks - include empty ones to preserve spacing
             blockContent.push({
@@ -296,6 +293,12 @@ export function TextEditor({
           }
         },
         handleKeyDown: (view, event) => {
+          // Cmd/Ctrl+A (Select All) - track this for deletion handling
+          if (event.key === 'a' && (event.ctrlKey || event.metaKey)) {
+            console.log('⌨️ TextEditor: Select All detected');
+            // Let ProseMirror handle it, but we'll watch for subsequent delete
+          }
+          
           // Enter key - save AFTER the new line is created
           if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
             console.log('⌨️ TextEditor: Enter key pressed - will save after new line');
@@ -320,6 +323,49 @@ export function TextEditor({
             }, 50);
             
             // Return false to let ProseMirror handle Enter normally
+            return false;
+          }
+          
+          // Delete/Backspace key - sync after deletion with debouncing
+          if (event.key === 'Delete' || event.key === 'Backspace') {
+            const { selection } = view.state;
+            const isLargeSelection = !selection.empty && (selection.to - selection.from) > 50;
+            const isSelectAll = !selection.empty && selection.from === 0 && selection.to === view.state.doc.content.size;
+            
+            console.log('⌨️ TextEditor: Delete/Backspace key pressed', {
+              isLargeSelection,
+              isSelectAll,
+              selectionSize: selection.to - selection.from
+            });
+            
+            // Clear any existing delete timeout
+            if (deleteTimeoutRef.current) {
+              clearTimeout(deleteTimeoutRef.current);
+            }
+            
+            // Use shorter timeout for large deletions or select all
+            const timeout = isLargeSelection || isSelectAll ? 100 : 500;
+            
+            // Debounce the sync to avoid too many Firebase calls
+            deleteTimeoutRef.current = setTimeout(() => {
+              if (!editorRef.current) {
+                console.log('⚠️ TextEditor: Editor destroyed, skipping sync');
+                return;
+              }
+              
+              // Get the current document state from the editor ref
+              const content = buildContentFromDocument(editorRef.current.state.doc);
+              console.log('🗑️ TextEditor: Syncing after delete - content length:', content.length);
+              
+              // Save to Firebase to sync deletions
+              saveContentToFirebase(content, title).then(() => {
+                console.log('✅ TextEditor: Delete sync to Firebase complete');
+              }).catch(error => {
+                console.error('❌ TextEditor: Delete sync to Firebase failed:', error);
+              });
+            }, timeout);
+            
+            // Return false to let ProseMirror handle delete normally
             return false;
           }
           
@@ -351,6 +397,11 @@ export function TextEditor({
     }
 
     return () => {
+      // Clear delete timeout
+      if (deleteTimeoutRef.current) {
+        clearTimeout(deleteTimeoutRef.current);
+      }
+      
       // Only cleanup on unmount
       if (nodeId !== prevNodeIdRef.current) {
         if (editorRef.current) {

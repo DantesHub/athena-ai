@@ -52,7 +52,7 @@ export function useEditorPersistence({
       if (!blocksLoadedRef.current) {
         NodeService.getBlocks(workspaceId, nodeId).then(loadedBlocks => {
           console.log('📋 Persistence: Loaded', loadedBlocks.length, 'blocks for node', nodeId);
-          console.log('📋 Persistence: Block data:', loadedBlocks.map(b => ({ id: b.id, text: b.text, order: b.order })));
+          console.log('📋 Persistence: Block data:', loadedBlocks.map(b => ({ id: b.id, type: b.type, text: b.text, order: b.order })));
           setBlocks(loadedBlocks);
           setBlocksLoaded(true);
           blocksLoadedRef.current = true;
